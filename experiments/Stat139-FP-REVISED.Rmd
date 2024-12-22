@@ -488,7 +488,7 @@ plot(model_full, 2)
 # 6 - Model Selection
 
 ```{r, results = "hide"}
-#Originally the model_full was not running on posit - we examined the dataset again and were able to take out more unnecesary values. As a result, we could run step selection on the full model and this gave us a better lowest AIC value (4128.74) than using the interactive term (4197.64)
+# Originally the model_full was not running on posit - we examined the dataset again and were able to take out more unnecesary values. As a result, we could run step selection on the full model and this gave us a better lowest AIC value (4128.74) than using the interactive term (4197.64)
 
 ## Results with Interactive term were:
 # Start:  AIC=-4415.95)
@@ -569,16 +569,259 @@ hist(residuals_backward, breaks = 30, col = "skyblue",
 
 ## 8.1 - Baseline
 
-```{r}
-# Why? A simple model to establish a baseline for predictive performance.
-# Linear regression helps identify if the relationship between predictors and response is linear. We could not use a Logistic Regression model because our output is not binary
 
+```{r}
 library("Metrics")
 set.seed(139)  
-split <- sample(1:nrow(merged_data_1), 0.7 * nrow(merged_data_1))  # 70/30 split
+split <- sample(1:nrow(merged_data_1), 0.7 * nrow(merged_data_1))  # 80/220 split
 
 train <- merged_data_1[split, ]
 test <- merged_data_1[-split, ]
+```
+
+```{r}
+# chcek the distribution of Deep..SWS..duration..min. / Asleep.duration..min in the dataset data=train distribution in a histogram
+
+# Calculate the ratio
+train$ratio <- train$Deep..SWS..duration..min. / train$Asleep.duration..min.
+
+# Compute the median
+median_ratio <- median(train$ratio, na.rm = TRUE)
+
+# Plot the histogram
+hist(train$ratio, 
+     main = "Distribution of the ratio of deep sleep to total minutes slept", 
+     xlab = "Deep-sleep ratio", 
+     ylab = "Frequency", 
+     col = "lightblue", 
+     border = "black")
+
+# Optional: Add a density curve
+lines(density(train$ratio, na.rm = TRUE), col = "red", lwd = 2)
+
+# Add a vertical line at the median
+abline(v = median_ratio, col = "blue", lwd = 2, lty = 2)
+
+# Add text labels indicating binary classification
+text(median_ratio - 0.03, max(hist(train$ratio, plot = FALSE)$counts) * 0.9, 
+     labels = "Label 0", col = "darkgreen")
+text(median_ratio + 0.03, max(hist(train$ratio, plot = FALSE)$counts) * 0.9, 
+     labels = "Label 1", col = "darkred")
+
+
+```
+```{r}
+install.packages("caret")
+install.packages("glmnet")        # For LASSO/Ridge
+install.packages("randomForest")  # For Random Forest
+install.packages("xgboost")       # For Gradient-Boosted Trees
+install.packages("e1071")         # For SVM
+# ... etc.
+```
+```{r}
+library(caret)
+```
+
+
+
+
+```{r}
+library(caret)
+library(Metrics)
+
+predictors <- good_sleep ~ 
+
+  Total.Duration.min + 
+  Total.Energy.burned.cal + 
+  Max.HR.bpm + 
+  Weighted.Avg.HR + 
+  Weighted.Avg.HR.Zone.1 + 
+  Weighted.Avg.HR.Zone.2 + 
+  Weighted.Avg.HR.Zone.3 + 
+  Weighted.Avg.HR.Zone.4 + 
+  Weighted.Avg.HR.Zone.5 + 
+  Weighted.Avg.HR.Zone.0
+
+
+
+set.seed(139)  # For reproducibility
+
+## Split data 80%/20% (you wrote 70% in your snippet, adapt as needed)
+trainIndex <- createDataPartition(merged_data_1$Deep..SWS..duration..min.,
+                                  p = 0.80, 
+                                  list = FALSE)
+train <- merged_data_1[ trainIndex, ]
+test  <- merged_data_1[-trainIndex, ]
+
+# Create the ratio variable
+train$ratio <- train$Deep..SWS..duration..min. / train$Asleep.duration..min.
+test$ratio  <- test$Deep..SWS..duration..min.  / test$Asleep.duration..min.
+
+# Calculate the median ratio from the training set
+median_ratio <- median(train$ratio, na.rm = TRUE)
+
+# Create the binary outcome "good_sleep"
+train$good_sleep <- ifelse(train$ratio > median_ratio, 1, 0)
+test$good_sleep  <- ifelse(test$ratio  > median_ratio, 1, 0)
+
+# Convert 0/1 to factors for caret classification
+# (caret typically expects a factor outcome for classification tasks)
+train$good_sleep <- factor(train$good_sleep, levels = c(0, 1), labels = c("bad_sleep", "good_sleep"))
+test$good_sleep  <- factor(test$good_sleep,  levels = c(0, 1), labels = c("bad_sleep", "good_sleep"))
+
+# Remove the ratio and specified variables from both datasets
+vars_to_remove <- c("ratio", 
+                    "Asleep.duration..min.",
+                    "Deep..SWS..duration..min.")
+
+train <- train[, !(colnames(train) %in% vars_to_remove)]
+test  <- test[, !(colnames(test) %in% vars_to_remove)]
+
+train <- na.omit(train)
+test  <- na.omit(test)
+
+
+# Confirm changes
+str(train)
+str(test)
+```
+
+
+```{r}
+table(train$good_sleep)
+table(test$good_sleep)
+
+```
+```{r}
+train
+```
+
+```{r}
+# For classification using caret:
+set.seed(139)
+
+ctrl <- trainControl(method = "cv",           # or "repeatedcv"
+                     number = 5,              # 5-fold cross-validation
+                     classProbs = TRUE,       # needed for some models
+                     summaryFunction = twoClassSummary, # for multi metrics
+                     savePredictions = "final")
+
+# We'll store results from different models in a list for convenience
+model_list <- list()
+
+```
+```{r}
+colSums(is.na(train))  # Count NAs per column
+train <- na.omit(train)
+sum(is.na(train))
+```
+
+```{r}
+# Caret method: "glmnet"
+# We'll keep it simple, but caret will tune alpha (0 -> Ridge, 1 -> LASSO)
+# and lambda automatically.
+
+set.seed(139)
+
+lasso_ridge_model <- train(
+  predictors,
+  data = train,
+  method = "glmnet",
+  trControl = ctrl,
+  metric = "ROC",
+  tuneLength = 10
+)
+
+# Inspect results
+print(lasso_ridge_model)
+plot(lasso_ridge_model)
+
+# Predict on test
+pred_lasso_ridge_prob <- predict(lasso_ridge_model, newdata = test, type = "prob")[, "good_sleep"]
+pred_lasso_ridge_class <- predict(lasso_ridge_model, newdata = test)
+confusionMatrix(pred_lasso_ridge_class, test$good_sleep, positive = "good_sleep")
+
+
+```
+```{r}
+# Models
+models <- list(
+  glm = train(predictors, data = train, method = "glm", family = binomial, trControl = ctrl, metric = "ROC"),
+  lasso = train(predictors, data = train, method = "glmnet", trControl = ctrl, metric = "ROC", tuneLength = 10),
+  knn = train(predictors, data = train, method = "knn", trControl = ctrl, metric = "ROC", tuneLength = 10),
+  rf = train(predictors, data = train, method = "rf", trControl = ctrl, metric = "ROC", tuneLength = 3),
+  xgb = train(predictors, data = train, method = "xgbTree", trControl = ctrl, metric = "ROC", tuneLength = 5),
+  svm = train(predictors, data = train, method = "svmRadial", trControl = ctrl, metric = "ROC", tuneLength = 5)
+)
+
+# Performance metrics
+results <- data.frame(Model = character(), Precision = numeric(), Accuracy = numeric(), Recall = numeric(), F1 = numeric())
+
+for (name in names(models)) {
+  pred <- predict(models[[name]], newdata = test)
+  cm <- confusionMatrix(pred, test$good_sleep, positive = "good_sleep")
+  precision <- cm$byClass["Precision"]
+  recall <- cm$byClass["Recall"]
+  f1 <- 2 * (precision * recall) / (precision + recall)
+  accuracy <- cm$overall["Accuracy"]
+  results <- rbind(results, data.frame(Model = name, Precision = precision, Accuracy = accuracy, Recall = recall, F1 = f1))
+}
+
+# Print results
+print(results)
+
+
+```
+```{r}
+# Extract coefficients for logistic regression (GLM)
+glm_coefs <- coef(models$glm$finalModel)
+glm_coefs <- glm_coefs[-1]  # Remove intercept
+
+# Extract coefficients for LASSO
+lasso_coefs <- coef(models$lasso$finalModel, s = models$lasso$bestTune$lambda)
+lasso_coefs <- as.vector(lasso_coefs[-1, 1])  # Remove intercept
+
+# Identify coefficients eliminated by LASSO
+lasso_eliminated <- names(glm_coefs)[lasso_coefs == 0]
+cat("LASSO eliminated coefficients for variables:", lasso_eliminated, "\n")
+
+# Prepare data for plotting - Logistic Regression
+coef_data_glm <- data.frame(Variable = names(glm_coefs), Coefficient = glm_coefs)
+
+ggplot(coef_data_glm, aes(x = Variable, y = Coefficient)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  coord_flip() +
+  labs(title = "Logistic Regression Coefficients", x = "Variable", y = "Coefficient Size") +
+  theme_minimal()
+
+# Prepare data for plotting - LASSO
+coef_data_lasso <- data.frame(Variable = names(glm_coefs), Coefficient = lasso_coefs)
+
+ggplot(coef_data_lasso, aes(x = Variable, y = Coefficient)) +
+  geom_bar(stat = "identity", fill = "red") +
+  coord_flip() +
+  labs(title = "LASSO Coefficients", x = "Variable", y = "Coefficient Size") +
+  theme_minimal()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Caden's work for regression prediction is here:
+```{r}
+# Why? A simple model to establish a baseline for predictive performance.
+# Linear regression helps identify if the relationship between predictors and response is linear. We could not use a Logistic Regression model because our output is not binary
 
 # Baseline Linear Regression
 baseline_model <- lm(Deep..SWS..duration..min. / Asleep.duration..min. ~ ., data = train)
